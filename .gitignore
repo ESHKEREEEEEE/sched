@@ -1,0 +1,21 @@
+# PostgreSQL build artifacts
+*.o
+*.so
+*.lo
+*.la
+*.a
+*.gcno
+*.gcda
+*.gcov
+*.log
+*.out
+*.rej
+*.bak
+*.swp
+*.tmp
+*.~*
+/logfile
+
+# General
+build/
+tmp/
