@@ -24,6 +24,11 @@ void die(SIGNAL_ARGS)
     got_sigterm = true;
 }
 
+typedef struct {
+    int id;
+    char *cmd;
+} TaskInfo;
+
 Datum
 call_shell_command(PG_FUNCTION_ARGS)
 {
@@ -106,21 +111,20 @@ Datum
 run_due_tasks(PG_FUNCTION_ARGS)
 {
     int spi_status;
-    int task_count;
-    uint64 nrows;
+    int task_count = 0;
+    uint64 nrows = 0;
     uint64 i;
     HeapTuple tuple;
     TupleDesc tupdesc;
     Datum id_datum;
     Datum cmd_datum;
-    int id;
-    char *cmd;
     bool isnull;
     char update_sql[1024];
     int exec_ret;
 
-    task_count = 0;
-    nrows = 0;
+    TaskInfo *tasks = NULL;
+    int id; 
+    char *cmd;
 
     PG_TRY();
     {
@@ -134,7 +138,7 @@ run_due_tasks(PG_FUNCTION_ARGS)
         spi_status = SPI_execute(
             "SELECT id, command FROM sched.tasks "
             "WHERE run_at <= now() AND status = 'pending'",
-            true, 0);
+            false, 0);
 
         elog(LOG, "[sched:run_due_tasks()] SPI_execute status: %d", spi_status);
 
@@ -149,33 +153,35 @@ run_due_tasks(PG_FUNCTION_ARGS)
 
         elog(LOG, "[sched:run_due_tasks()] Found %lu pending tasks", (unsigned long)nrows);
 
+        // Копируем задачи
+        tasks = (TaskInfo *) palloc0(sizeof(TaskInfo) * nrows);
+
         for (i = 0; i < nrows; i++)
         {
             tuple = SPI_tuptable->vals[i];
 
             id_datum = SPI_getbinval(tuple, tupdesc, 1, &isnull);
             if (isnull)
-            {
-                elog(WARNING, "NULL id in task row %lu, skipping", (unsigned long)i);
                 continue;
-            }
-            id = DatumGetInt32(id_datum);
-
             cmd_datum = SPI_getbinval(tuple, tupdesc, 2, &isnull);
             if (isnull)
-            {
-                elog(WARNING, "NULL command in task id %d, skipping", id);
                 continue;
-            }
-            cmd = TextDatumGetCString(cmd_datum);
-			
-            elog(LOG, "[sched] Running task id %d: %s", id, cmd);
-			
-			//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-			//!TASK RUNNING AS SQL 							  !
-			//!TODO: ADD SHELL TASKS WITH call_shell_command()!
-			//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-			
+
+            tasks[i].id = DatumGetInt32(id_datum);
+            tasks[i].cmd = TextDatumGetCString(cmd_datum);  // strdup не нужен, уже копия
+        }
+
+        // Выполняем задачи
+        for (i = 0; i < nrows; i++)
+        {
+            id = tasks[i].id;
+            cmd = tasks[i].cmd;
+			elog(LOG, "[sched] Running task id %d: %s", id, cmd);
+            if (cmd == NULL || strlen(cmd) == 0)
+            {
+            	elog(LOG, "[sched] Found NULL");
+                continue;
+			}
             exec_ret = SPI_execute(cmd, false, 0);
 
             if (exec_ret == SPI_OK_SELECT || exec_ret == SPI_OK_INSERT ||
@@ -194,11 +200,23 @@ run_due_tasks(PG_FUNCTION_ARGS)
                          "UPDATE sched.tasks SET status = 'failed', executed_at = now(), error = 'execution error' WHERE id = %d", id);
             }
 
+            elog(LOG, "[sched] Trying to update task %d status", id);
             SPI_execute(update_sql, false, 0);
-            task_count++;
+            elog(LOG, "[sched] Updated task %d status", id);
         }
-
+		elog(LOG, "[sched] Started SPI_finish");
         SPI_finish();
+        
+        
+        //!!!!!!!!!!!!!!!!!!!!!!!
+        //MEMORY LEAK BUT WORKING
+        //!!!!!!!!!!!!!!!!!!!!!!!
+        /*if (tasks)
+        {
+        	elog(LOG, "[sched] Started pfree(tasks)");
+            pfree(tasks);
+            elog(LOG, "[sched] Finished pfree(tasks)");
+        }*/
     }
     PG_CATCH();
     {
@@ -206,12 +224,13 @@ run_due_tasks(PG_FUNCTION_ARGS)
         EmitErrorReport();
         FlushErrorState();
         SPI_finish();
+        if (tasks)
+            pfree(tasks);
         PG_RETURN_INT32(task_count);
     }
     PG_END_TRY();
 
     elog(LOG, "[sched:run_due_tasks()] run_due_tasks() finished, executed %d tasks", task_count);
-
     PG_RETURN_INT32(task_count);
 }
 
