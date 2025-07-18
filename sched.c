@@ -134,6 +134,7 @@ run_due_tasks(PG_FUNCTION_ARGS)
         if (spi_status != SPI_OK_CONNECT)
             elog(ERROR, "SPI_connect failed");
 
+		//Getting tasks from sched.tasks
         elog(LOG, "[sched:run_due_tasks()] Selecting due tasks...");
         spi_status = SPI_execute(
             "SELECT id, command FROM sched.tasks "
@@ -153,7 +154,7 @@ run_due_tasks(PG_FUNCTION_ARGS)
 
         elog(LOG, "[sched:run_due_tasks()] Found %lu pending tasks", (unsigned long)nrows);
 
-        // Копируем задачи
+        // Saving tasks in TaskInfo struct
         tasks = (TaskInfo *) palloc0(sizeof(TaskInfo) * nrows);
 
         for (i = 0; i < nrows; i++)
@@ -168,10 +169,10 @@ run_due_tasks(PG_FUNCTION_ARGS)
                 continue;
 
             tasks[i].id = DatumGetInt32(id_datum);
-            tasks[i].cmd = TextDatumGetCString(cmd_datum);  // strdup не нужен, уже копия
+            tasks[i].cmd = pstrdup(TextDatumGetCString(cmd_datum)); 
         }
 
-        // Выполняем задачи
+        // Running tasks from TaskInfo
         for (i = 0; i < nrows; i++)
         {
             id = tasks[i].id;
@@ -182,6 +183,10 @@ run_due_tasks(PG_FUNCTION_ARGS)
             	elog(LOG, "[sched] Found NULL");
                 continue;
 			}
+			
+			//TODO: Add shell commands with call_shell_command()
+			
+			
             exec_ret = SPI_execute(cmd, false, 0);
 
             if (exec_ret == SPI_OK_SELECT || exec_ret == SPI_OK_INSERT ||
@@ -199,24 +204,29 @@ run_due_tasks(PG_FUNCTION_ARGS)
                 snprintf(update_sql, sizeof(update_sql),
                          "UPDATE sched.tasks SET status = 'failed', executed_at = now(), error = 'execution error' WHERE id = %d", id);
             }
-
+            
+			//Updating current task status
             elog(LOG, "[sched] Trying to update task %d status", id);
             SPI_execute(update_sql, false, 0);
             elog(LOG, "[sched] Updated task %d status", id);
         }
 		elog(LOG, "[sched] Started SPI_finish");
-        SPI_finish();
         
-        
-        //!!!!!!!!!!!!!!!!!!!!!!!
-        //MEMORY LEAK BUT WORKING
-        //!!!!!!!!!!!!!!!!!!!!!!!
-        /*if (tasks)
+        //Freeing memory
+        if (tasks)
         {
         	elog(LOG, "[sched] Started pfree(tasks)");
-            pfree(tasks);
+        	
+            for (i = 0; i < nrows; i++) 
+            {
+    			if (tasks[i].cmd)
+        			pfree(tasks[i].cmd);
+        	}
+			pfree(tasks);
+
             elog(LOG, "[sched] Finished pfree(tasks)");
-        }*/
+        }
+        SPI_finish();
     }
     PG_CATCH();
     {
@@ -225,7 +235,15 @@ run_due_tasks(PG_FUNCTION_ARGS)
         FlushErrorState();
         SPI_finish();
         if (tasks)
-            pfree(tasks);
+		{
+    	for (i = 0; i < nrows; i++)
+    	{
+        	if (tasks[i].cmd)
+            	pfree(tasks[i].cmd);
+        }
+    	pfree(tasks);
+		}
+
         PG_RETURN_INT32(task_count);
     }
     PG_END_TRY();
