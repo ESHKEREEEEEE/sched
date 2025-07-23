@@ -8,13 +8,14 @@
 *.gcda
 *.gcov
 *.log
-*.out
 *.rej
 *.bak
 *.swp
 *.tmp
 *.~*
 /logfile
+tmp_install/
+results/
 
 # General
 build/

@@ -24,7 +24,7 @@ CREATE TABLE sched.whitelist (
 );
 
 --Test values for whitelist
-INSERT INTO sched.whitelist(command) VALUES ('ls'); 
+--INSERT INTO sched.whitelist(command) VALUES ('ls'); 
 
 --added as sql function for testing
 --create function call_shell_command(cmd text)
