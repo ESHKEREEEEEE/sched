@@ -23,25 +23,26 @@ CREATE TABLE sched.whitelist (
     command text NOT NULL
 );
 
---Test values for whitelist
---INSERT INTO sched.whitelist(command) VALUES ('ls'); 
-
---added as sql function for testing
---create function call_shell_command(cmd text)
---RETURNS integer
---AS 'sched', 'call_shell_command'
---LANGUAGE C STRICT;
-
 --Task scheduling function
+DROP FUNCTION IF EXISTS schedule_task(text, timestamptz, text);
 CREATE FUNCTION schedule_task(cmd text, run_at timestamptz, type text)
 RETURNS void
 AS 'sched', 'schedule_task'
-LANGUAGE C STRICT;
+LANGUAGE C STRICT
+SECURITY DEFINER;
 
---added as sql function for testing
+--Running all pending tasks manually
+DROP FUNCTION IF EXISTS run_due_tasks();
 CREATE FUNCTION run_due_tasks()
 RETURNS integer
 AS 'sched', 'run_due_tasks'
-LANGUAGE C;
+LANGUAGE C
+SECURITY DEFINER;
+
+REVOKE ALL ON sched.tasks FROM PUBLIC;
+REVOKE ALL ON sched.whitelist FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION schedule_task(text, timestamptz, text) TO PUBLIC;
+GRANT USAGE ON SCHEMA sched TO PUBLIC;
+
 
 

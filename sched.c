@@ -7,7 +7,6 @@
 #include "utils/timestamp.h"
 #include "utils/lsyscache.h"
 #include "utils/elog.h"
-#include "sched.h"
 #include <sys/wait.h>
 #include <stdlib.h>
 
@@ -18,24 +17,43 @@ PG_FUNCTION_INFO_V1(run_due_tasks);
 
 bool exec_sql(char* sql);
 int call_shell_command(char* cmd);
+void _PG_init(void);
 
-volatile sig_atomic_t got_sigterm = false;
-
-void die(SIGNAL_ARGS)
+typedef struct 
 {
-    got_sigterm = true;
-}
-
-typedef struct {
     int id;
     char *cmd;
     char *type;
 } TaskInfo;
 
-typedef struct {
+typedef struct 
+{
 	int id;
 	char *cmd;
 } WhitelistInfo;
+
+
+void _PG_init(void)
+{
+    BackgroundWorker worker;
+	//Worker structure initialization
+    MemSet(&worker, 0, sizeof(BackgroundWorker));
+    worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+    worker.bgw_start_time = BgWorkerStart_ConsistentState;
+    worker.bgw_restart_time = 10;
+    snprintf(worker.bgw_name, BGW_MAXLEN, "sched_worker");
+
+    strlcpy(worker.bgw_library_name, "sched", sizeof(worker.bgw_library_name));
+    strlcpy(worker.bgw_function_name, "sched_worker_main", sizeof(worker.bgw_function_name));
+
+    worker.bgw_main_arg = (Datum) 0;
+    worker.bgw_notify_pid = 0;
+
+    elog(LOG, "[sched_worker] Registering background worker");
+    
+    //Registering worker
+    RegisterBackgroundWorker(&worker);
+}
 
 int call_shell_command(char* cmd)
 {
@@ -60,10 +78,13 @@ int call_shell_command(char* cmd)
     elog(LOG, "[sched:call_shell_command()] SPI_execute status: %d", spi_status);
 
     if (spi_status != SPI_OK_SELECT)
+    {
         elog(ERROR, "SPI_execute failed when selecting tasks");
-
-    if (SPI_tuptable == NULL){ elog(ERROR, "SPI_tuptable is NULL"); }
-	
+	}
+    if (SPI_tuptable == NULL)
+    {
+    	elog(ERROR, "SPI_tuptable is NULL");
+	}
 	nrows = SPI_processed;
     tupdesc = SPI_tuptable->tupdesc;
 	
@@ -74,9 +95,9 @@ int call_shell_command(char* cmd)
         if (isnull)
             continue;
 
-        if (!strcmp(cmd, TextDatumGetCString(cmd_datum))) {
+        if (!strcmp(cmd, TextDatumGetCString(cmd_datum))) 
+        {
         ret = system(cmd); //Call
-        
         elog(LOG, "[sched:call_shell_command()] Executed shell command '%s' with result %d", cmd, ret);
         break;
         };
@@ -124,21 +145,23 @@ schedule_task(PG_FUNCTION_ARGS)
     char *run_at_str = DatumGetCString(DirectFunctionCall1(timestamptz_out, TimestampTzGetDatum(run_at)));
 
 	//Creating sql
-    snprintf(sql, sizeof(sql),
+	if (!strcmp(type, "sh") || !strcmp(type, "sql"))
+	{
+    	snprintf(sql, sizeof(sql),
              "INSERT INTO sched.tasks(command, run_at, type) VALUES('%s', '%s', '%s')",
              cmd, run_at_str, type);
 
-    ret = SPI_connect();
-    if (ret != SPI_OK_CONNECT)
-        elog(ERROR, "SPI_connect failed");
+    	ret = SPI_connect();
+    	if (ret != SPI_OK_CONNECT)
+        	elog(ERROR, "SPI_connect failed");
 	
-	//Inserting task into tasks table
-    ret = SPI_execute(sql, false, 0);
+		//Inserting task into tasks table
+    	ret = SPI_execute(sql, false, 0);
 
-    SPI_finish();
-
+    	SPI_finish();
+	}
     if (ret != SPI_OK_INSERT)
-        elog(ERROR, "Could not insert task");
+        elog(WARNING, "Could not insert task");
 
     PG_RETURN_VOID();
 }
@@ -238,10 +261,8 @@ run_due_tasks(PG_FUNCTION_ARGS)
 			{
 				shell_err = 0;
 				
-				ret = call_shell_command(cmd);
-				
 				elog(LOG, "[sched:run_due_tasks()] Found command with sh type");
-				
+				ret = call_shell_command(cmd);
 				
         		if (ret == -1) 
         		{
@@ -275,16 +296,17 @@ run_due_tasks(PG_FUNCTION_ARGS)
         
 				if (shell_err)
 				{
-				snprintf(update_sql, sizeof(update_sql),
+					snprintf(update_sql, sizeof(update_sql),
                          	"UPDATE sched.tasks SET status = '%s', executed_at = now(), error = '%s' WHERE id = %d", status_str, error_str, id);
                 } 
                 else 
                 {
-                snprintf(update_sql, sizeof(update_sql),
+                	snprintf(update_sql, sizeof(update_sql),
                          	"UPDATE sched.tasks SET status = '%s', executed_at = now() WHERE id = %d", status_str, id);
                 }
 			}
-			else {		//type != sh => sql
+			else //type != sh => sql
+			{		
             	if (exec_sql(cmd)) //Using exec_sql to run sql tasks
             	{
                 	snprintf(update_sql, sizeof(update_sql),
@@ -304,22 +326,8 @@ run_due_tasks(PG_FUNCTION_ARGS)
             SPI_execute(update_sql, false, 0);
             elog(LOG, "[sched] Updated task %d status", id);
         }
-		elog(LOG, "[sched] Started SPI_finish");
         
-        //Freeing memory
-        if (tasks)
-        {
-        	elog(LOG, "[sched] Started pfree(tasks)");
-        	
-            for (i = 0; i < nrows; i++) 
-            {
-    			if (tasks[i].cmd)
-        			pfree(tasks[i].cmd);
-        	}
-			pfree(tasks);
-
-            elog(LOG, "[sched] Finished pfree(tasks)");
-        }
+		elog(LOG, "[sched] Started SPI_finish");
         SPI_finish();
     }
     PG_CATCH();
@@ -328,23 +336,10 @@ run_due_tasks(PG_FUNCTION_ARGS)
         EmitErrorReport();
         FlushErrorState();
         SPI_finish();
-        if (tasks)
-		{
-    	for (i = 0; i < nrows; i++)
-    	{
-        	if (tasks[i].cmd)
-            	pfree(tasks[i].cmd);
-        }
-    	pfree(tasks);
-		}
-
         PG_RETURN_INT32(task_count);
-    }
+	}
     PG_END_TRY();
 
     elog(LOG, "[sched:run_due_tasks()] run_due_tasks() finished, executed %d tasks", task_count);
     PG_RETURN_INT32(task_count);
 }
-
-
-
