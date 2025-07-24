@@ -3,6 +3,8 @@
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION sched" to load this file. \quit
 
+CREATE ROLE sched_admin NOINHERIT LOGIN PASSWORD 'securepass';
+
 CREATE SCHEMA IF NOT EXISTS sched;
 
 --Table for tasks
@@ -39,9 +41,17 @@ AS 'sched', 'run_due_tasks'
 LANGUAGE C
 SECURITY DEFINER;
 
+ALTER TABLE sched.tasks OWNER TO sched_admin;
+ALTER TABLE sched.whitelist OWNER TO sched_admin;
+
+ALTER FUNCTION schedule_task(text, timestamptz, text) OWNER TO sched_admin;
+ALTER FUNCTION run_due_tasks() OWNER TO sched_admin;
+
+
 REVOKE ALL ON sched.tasks FROM PUBLIC;
 REVOKE ALL ON sched.whitelist FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION schedule_task(text, timestamptz, text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION run_due_tasks() TO PUBLIC;
 GRANT USAGE ON SCHEMA sched TO PUBLIC;
 
 

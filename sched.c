@@ -1,5 +1,4 @@
 // contrib/sched/sched.c
-
 #include "postgres.h"
 #include "fmgr.h"
 #include "utils/builtins.h"
@@ -7,6 +6,13 @@
 #include "utils/timestamp.h"
 #include "utils/lsyscache.h"
 #include "utils/elog.h"
+#include "miscadmin.h"
+#include "utils/guc.h"
+#include "utils/memutils.h"
+#include "postmaster/bgworker.h"
+
+#include <string.h>
+#include <ctype.h>
 #include <sys/wait.h>
 #include <stdlib.h>
 
@@ -32,28 +38,67 @@ typedef struct
 	char *cmd;
 } WhitelistInfo;
 
+static char *sched_databases = NULL;
 
-void _PG_init(void)
+void
+_PG_init(void)
 {
+    char *raw;
+    char *token;
+    char *saveptr;
     BackgroundWorker worker;
-	//Worker structure initialization
-    MemSet(&worker, 0, sizeof(BackgroundWorker));
-    worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
-    worker.bgw_start_time = BgWorkerStart_ConsistentState;
-    worker.bgw_restart_time = 10;
-    snprintf(worker.bgw_name, BGW_MAXLEN, "sched_worker");
+	
+	//In make check
+    if (!process_shared_preload_libraries_in_progress)
+        return;
+        
+	//Not in make check
+	
+    DefineCustomStringVariable("sched.databases",
+                               "Comma-separated list of databases to run sched worker in.",
+                               NULL,
+                               &sched_databases,
+                               NULL,
+                               PGC_POSTMASTER,
+                               0,
+                               NULL,
+                               NULL,
+                               NULL);
 
-    strlcpy(worker.bgw_library_name, "sched", sizeof(worker.bgw_library_name));
-    strlcpy(worker.bgw_function_name, "sched_worker_main", sizeof(worker.bgw_function_name));
+	//Making workers for databases in config
+    if (!sched_databases || strlen(sched_databases) == 0)
+    {
+        elog(LOG, "[sched:_PG_init] No databases specified in sched.databases");
+        return;
+    }
 
-    worker.bgw_main_arg = (Datum) 0;
-    worker.bgw_notify_pid = 0;
+    raw = pstrdup(sched_databases);
+    token = strtok_r(raw, ",", &saveptr);
 
-    elog(LOG, "[sched_worker] Registering background worker");
-    
-    //Registering worker
-    RegisterBackgroundWorker(&worker);
+    while (token != NULL)
+    {
+        while (isspace(*token)) token++; // Trim leading space
+
+        MemSet(&worker, 0, sizeof(BackgroundWorker));
+
+        worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+        worker.bgw_start_time = BgWorkerStart_ConsistentState;
+        worker.bgw_restart_time = 10;
+
+        snprintf(worker.bgw_name, BGW_MAXLEN, "sched_worker for %s", token);
+        strlcpy(worker.bgw_library_name, "sched", sizeof(worker.bgw_library_name));
+        strlcpy(worker.bgw_function_name, "sched_worker_main", sizeof(worker.bgw_function_name));
+
+        worker.bgw_main_arg = CStringGetDatum(MemoryContextStrdup(TopMemoryContext, token));
+        worker.bgw_notify_pid = 0;
+
+        elog(LOG, "[sched:_PG_init] Registering worker for DB: %s", token);
+        RegisterBackgroundWorker(&worker);
+
+        token = strtok_r(NULL, ",", &saveptr);
+    }
 }
+
 
 int call_shell_command(char* cmd)
 {
